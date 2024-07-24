@@ -1,3 +1,4 @@
+using RCall
 
 mutable struct ExpectationMaximization{CVS <: AbstractCovarianceStructure, L, T, K, S}
 	data::L
@@ -144,24 +145,52 @@ function update!(EM::ExpectationMaximization{CVS}, β::Float64) where {CVS <: Fu
 	#### E-step & M-step
 	EM.zⁿₖ = [Zⁿ(mix, point, β) for point ∈ Y];
 	W = EM.weights.* N_data
+	println("using my version")
+	R"library(tmvtnorm)"
+	# R"library(compiler)"
+	# R"mtmvnorm_opt <- cmpfun(mtmvnorm)"
 	for k ∈ 1:N_components
 		μₖ = mix.components[k].normal.μ
 		Σₖ = mix.components[k].normal.Σ
-		NewKernel = TruncatedMvNormal(MvNormal(zero(μₖ), Σₖ), a .- μₖ, b .- μₖ)
+		# NewKernel = TruncatedMvNormal(MvNormal(zero(μₖ), Σₖ), a .- μₖ, b .- μₖ)
 
-		M1,M2 = moments(NewKernel)
+		# M1,M2 = moments(NewKernel)
 		
 		# η
 		η[k] = mean(EM.zⁿₖ[n][k]* W[n] for n ∈ 1:N_data)
 		normalization = η[k]*N_data
 
+		zero_mu_k = zero(μₖ)
+		a_minus_mu_k = a .- μₖ
+		b_minus_mu_k = b .- μₖ
+
+		R"mu <- $zero_mu_k"
+		R"covariance <- $Σₖ"
+		R"s <- $a_minus_mu_k"
+		R"t <- $b_minus_mu_k"
+		R"""
+			mmnts <- mtmvnorm(
+					mean = mu,
+					sigma = covariance,
+					lower = s,
+					upper = t
+				)
+		"""
+		R"tmu <- mmnts$tmean"
+		R"tvar <- mmnts$tvar"
+
+		tmu = @rget tmu
+		tvar = @rget tvar
+
 		# μ
-		mₖ = M1
+		# mₖ = M1
+		mₖ = tmu
 		μ_vec = sum(EM.zⁿₖ[n][k]*Y[n]* W[n] for n ∈ 1:N_data)/(normalization) .- mₖ
 
 
 		# Σ
-		Hₖ = Σₖ .- M2
+		# Hₖ = Σₖ .- M2
+		Hₖ = Σₖ .- (tvar.+*(tmu,tmu'))
 		Σʼ = sum(EM.zⁿₖ[n][k]* W[n]*(Y[n]-μ_vec)*(Y[n]-μ_vec)' for n ∈ 1:N_data)/normalization
 		Σʼ .= Σʼ .+ Hₖ
 		# Impose hermiticity if lost:
